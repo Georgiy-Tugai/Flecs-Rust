@@ -121,6 +121,37 @@ fn query_each_sparse() {
 }
 
 #[test]
+fn query_each_iterator() {
+    let world = World::new();
+
+    world.component::<Position>();
+    world.component::<Velocity>();
+
+    let entity = world
+        .entity()
+        .set(Position { x: 10, y: 20 })
+        .set(Velocity { x: 1, y: 2 });
+
+    let q = world.query::<(&mut Position, &Velocity)>().build();
+
+    let mut it = q.into_each();
+    while let Some((p, v)) = it.next() {
+        p.x += v.x;
+        p.y += v.y;
+    }
+
+    // q.each(|(p, v)| {
+    //     p.x += v.x;
+    //     p.y += v.y;
+    // });
+
+    entity.get::<&Position>(|p| {
+        assert_eq!(p.x, 11);
+        assert_eq!(p.y, 22);
+    });
+}
+
+#[test]
 fn query_iter_targets() {
     let world = World::new();
 

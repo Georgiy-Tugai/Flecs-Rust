@@ -27,10 +27,185 @@ pub trait IterOperations {
     fn query_ptr(&self) -> *const sys::ecs_query_t;
 }
 
+pub trait LendingIterator {
+    /// The type of the elements being iterated over.
+    type Item<'a>
+    where
+        Self: 'a;
+
+    /// Advances the lending iterator and returns the next value.
+    ///
+    /// See [`Iterator::next`].
+    fn next(&mut self) -> Option<Self::Item<'_>>;
+}
+
+pub struct QueryEachIter<'a, T, P, Q>
+where
+    T: QueryTuple,
+    Q: QueryAPI<'a, P, T> + ?Sized,
+{
+    iter: sys::ecs_iter_t,
+    qapi: &'a Q,
+    ptrs: Option<T::Pointers>,
+    idx: usize,
+    iter_count: usize,
+    lock: Option<TableLock<'a>>,
+    done: bool,
+    _p: std::marker::PhantomData<&'a P>,
+}
+
+impl<'a, T, P, Q> LendingIterator for QueryEachIter<'a, T, P, Q>
+where
+    T: QueryTuple,
+    Q: QueryAPI<'a, P, T>,
+{
+    type Item<'b>
+        = (TableIter<'b>, usize, T::TupleType<'b>)
+    where
+        Self: 'b;
+
+    fn next(&mut self) -> Option<Self::Item<'_>> {
+        if self.done {
+            return None;
+        }
+
+        // might have empty tables
+        loop {
+            // finished with current table
+            if self.idx < self.iter_count {
+                let table_iter = unsafe { TableIter::new(&mut self.iter) };
+                let tuple = self
+                    .ptrs
+                    .as_mut()
+                    .map(|p| p.get_tuple(&table_iter.iter, self.idx))
+                    .unwrap();
+                let ret = Some((table_iter, self.idx, tuple));
+                self.idx += 1;
+                return ret;
+            } else {
+                self.lock = None;
+                self.ptrs = None;
+            }
+
+            // grab first/next table
+            if self.ptrs.is_none() {
+                if !self.qapi.iter_next(&mut self.iter) {
+                    self.done = true;
+                    return None;
+                }
+                self.ptrs = Some(T::create_ptrs(&self.iter));
+                self.idx = 0;
+                self.iter_count = {
+                    if self.iter.count == 0 && self.iter.table.is_null() {
+                        1_usize
+                    } else {
+                        self.iter.count as usize
+                    }
+                };
+                let table = unsafe { self.iter.table.as_mut() };
+                self.lock = table.map(|table| TableLock::new(self.qapi.world(), table.into()));
+            }
+        }
+    }
+}
+
+impl<'a, T, P, Q> Drop for QueryEachIter<'a, T, P, Q>
+where
+    T: QueryTuple,
+    Q: QueryAPI<'a, P, T> + ?Sized,
+{
+    fn drop(&mut self) {
+        if !self.done {
+            // If the world didn't end through normal reasons (user dropping it manually or resetting it)
+            // and it's holding remaining references to queries in Rust, the world will panic, in that case, don't invoke
+            // the iterator destruction since the memory will already be invalidated.
+            if !self.qapi.world().world_ctx().is_panicking() {
+                unsafe {
+                    sys::ecs_iter_fini(&mut self.iter);
+                }
+            }
+        }
+    }
+}
+
+pub struct QueryEach<'a, T, P, Q>
+where
+    T: QueryTuple,
+    Q: QueryAPI<'a, P, T> + ?Sized,
+{
+    inner: QueryEachIter<'a, T, P, Q>,
+}
+
+impl<'a, T, P, Q> LendingIterator for QueryEach<'a, T, P, Q>
+where
+    T: QueryTuple,
+    Q: QueryAPI<'a, P, T>,
+{
+    type Item<'b>
+        = T::TupleType<'b>
+    where
+        Self: 'b;
+
+    fn next(&mut self) -> Option<Self::Item<'_>> {
+        self.inner.next().map(|i| i.2)
+    }
+}
+
+pub struct QueryEachEntity<'a, T, P, Q>
+where
+    T: QueryTuple,
+    Q: QueryAPI<'a, P, T> + ?Sized,
+{
+    inner: QueryEachIter<'a, T, P, Q>,
+}
+
+impl<'a, T, P, Q> LendingIterator for QueryEachEntity<'a, T, P, Q>
+where
+    T: QueryTuple,
+    Q: QueryAPI<'a, P, T>,
+{
+    type Item<'b>
+        = (EntityView<'b>, T::TupleType<'b>)
+    where
+        Self: 'b;
+
+    fn next(&mut self) -> Option<Self::Item<'_>> {
+        self.inner.next().map(|i| (i.0.entity(i.1), i.2))
+    }
+}
+
 pub trait QueryAPI<'a, P, T>: IterOperations + WorldProvider<'a>
 where
     T: QueryTuple,
 {
+    fn into_each(&'a self) -> QueryEach<'a, T, P, Self> {
+        QueryEach {
+            inner: self.into_each_iter(),
+        }
+    }
+
+    fn into_each_entity(&'a self) -> QueryEachEntity<'a, T, P, Self> {
+        QueryEachEntity {
+            inner: self.into_each_iter(),
+        }
+    }
+
+    fn into_each_iter(&'a self) -> QueryEachIter<'a, T, P, Self> {
+        let mut iter = self.retrieve_iter();
+        iter.flags |= sys::EcsIterCppEach;
+
+        QueryEachIter {
+            iter,
+            qapi: self,
+            ptrs: None,
+            idx: 0,
+            iter_count: 0,
+            lock: None,
+            done: false,
+            _p: std::marker::PhantomData::default(),
+        }
+    }
+
     // TODO once we have tests in place, I will split this functionality up into multiple functions, which should give a small performance boost
     // by caching if the query has used a "is_ref" operation.
     // is_ref is true for any query that contains fields that are not matched on the entity itself
