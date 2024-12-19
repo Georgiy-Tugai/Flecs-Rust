@@ -172,10 +172,10 @@ where
     }
 }
 
-impl<'a, P, T> QueryAPI<'a, P, T> for QueryIter<'a, P, T>
+impl<'world, 'a: 'world, P, T> QueryAPI<'world, 'a, P, T> for QueryIter<'a, P, T>
 where
     T: QueryTuple,
-    Self: WorldProvider<'a>,
+    Self: WorldProvider<'world>,
 {
     fn entity(&self) -> EntityView {
         let world = unsafe { WorldRef::from_ptr(self.iter.real_world) };

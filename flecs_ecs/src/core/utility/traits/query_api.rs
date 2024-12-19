@@ -2,6 +2,7 @@ use std::ffi::c_char;
 
 use flecs_ecs::core::*;
 use flecs_ecs::sys;
+use lending_iterator::prelude::*;
 
 /// Custom error type for `try_first_only` failures.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -27,37 +28,26 @@ pub trait IterOperations {
     fn query_ptr(&self) -> *const sys::ecs_query_t;
 }
 
-pub trait LendingIterator {
-    /// The type of the elements being iterated over.
-    type Item<'a>
-    where
-        Self: 'a;
-
-    /// Advances the lending iterator and returns the next value.
-    ///
-    /// See [`Iterator::next`].
-    fn next(&mut self) -> Option<Self::Item<'_>>;
-}
-
-pub struct QueryEachIter<'a, T, P, Q>
+pub struct QueryEachIter<'world, 'a: 'world, T, P, Q>
 where
     T: QueryTuple,
-    Q: QueryAPI<'a, P, T> + ?Sized,
+    Q: QueryAPI<'world, 'a, P, T> + ?Sized,
 {
     iter: sys::ecs_iter_t,
     qapi: &'a Q,
     ptrs: Option<T::Pointers>,
     idx: usize,
     iter_count: usize,
-    lock: Option<TableLock<'a>>,
+    lock: Option<TableLock<'world>>,
     done: bool,
     _p: std::marker::PhantomData<&'a P>,
 }
 
-impl<'a, T, P, Q> LendingIterator for QueryEachIter<'a, T, P, Q>
+#[gat]
+impl<'world, 'a: 'world, T, P, Q> LendingIterator for QueryEachIter<'world, 'a, T, P, Q>
 where
     T: QueryTuple,
-    Q: QueryAPI<'a, P, T>,
+    Q: QueryAPI<'world, 'a, P, T> + ?Sized,
 {
     type Item<'b>
         = (TableIter<'b>, usize, T::TupleType<'b>)
@@ -109,10 +99,10 @@ where
     }
 }
 
-impl<'a, T, P, Q> Drop for QueryEachIter<'a, T, P, Q>
+impl<'world, 'a: 'world, T, P, Q> Drop for QueryEachIter<'world, 'a, T, P, Q>
 where
     T: QueryTuple,
-    Q: QueryAPI<'a, P, T> + ?Sized,
+    Q: QueryAPI<'world, 'a, P, T> + ?Sized,
 {
     fn drop(&mut self) {
         if !self.done {
@@ -128,69 +118,30 @@ where
     }
 }
 
-pub struct QueryEach<'a, T, P, Q>
-where
-    T: QueryTuple,
-    Q: QueryAPI<'a, P, T> + ?Sized,
-{
-    inner: QueryEachIter<'a, T, P, Q>,
+macro_rules! implLendingIterator {
+    (for<$lt:lifetime> $t:ty) => {impl LendingIterator + for<$lt> LendingIteratorඞItem<$lt, T = $t>}
 }
 
-impl<'a, T, P, Q> LendingIterator for QueryEach<'a, T, P, Q>
-where
-    T: QueryTuple,
-    Q: QueryAPI<'a, P, T>,
-{
-    type Item<'b>
-        = T::TupleType<'b>
-    where
-        Self: 'b;
-
-    fn next(&mut self) -> Option<Self::Item<'_>> {
-        self.inner.next().map(|i| i.2)
-    }
-}
-
-pub struct QueryEachEntity<'a, T, P, Q>
-where
-    T: QueryTuple,
-    Q: QueryAPI<'a, P, T> + ?Sized,
-{
-    inner: QueryEachIter<'a, T, P, Q>,
-}
-
-impl<'a, T, P, Q> LendingIterator for QueryEachEntity<'a, T, P, Q>
-where
-    T: QueryTuple,
-    Q: QueryAPI<'a, P, T>,
-{
-    type Item<'b>
-        = (EntityView<'b>, T::TupleType<'b>)
-    where
-        Self: 'b;
-
-    fn next(&mut self) -> Option<Self::Item<'_>> {
-        self.inner.next().map(|i| (i.0.entity(i.1), i.2))
-    }
-}
-
-pub trait QueryAPI<'a, P, T>: IterOperations + WorldProvider<'a>
+pub trait QueryAPI<'world, 'a: 'world, P: 'a, T>: IterOperations + WorldProvider<'world>
 where
     T: QueryTuple,
 {
-    fn into_each(&'a self) -> QueryEach<'a, T, P, Self> {
-        QueryEach {
-            inner: self.into_each_iter(),
-        }
+    fn into_each(
+        &'a self,
+    ) -> impl LendingIterator + for<'next> LendingIteratorඞItem<'next, T = T::TupleType<'next>>
+    {
+        self.into_each_iter()
+            .map::<HKT!(T::TupleType<'_>), _>(|[], t| t.2)
     }
 
-    fn into_each_entity(&'a self) -> QueryEachEntity<'a, T, P, Self> {
-        QueryEachEntity {
-            inner: self.into_each_iter(),
-        }
+    fn into_each_entity(
+        &'a self,
+    ) -> implLendingIterator!(for<'next> (EntityView<'next>, T::TupleType<'next>)) {
+        self.into_each_iter()
+            .map::<HKT!((EntityView<'_>, T::TupleType<'_>)), _>(|[], t| (t.0.entity(t.1), t.2))
     }
 
-    fn into_each_iter(&'a self) -> QueryEachIter<'a, T, P, Self> {
+    fn into_each_iter(&'a self) -> QueryEachIter<'world, 'a, T, P, Self> {
         let mut iter = self.retrieve_iter();
         iter.flags |= sys::EcsIterCppEach;
 
@@ -405,7 +356,7 @@ where
     ///
     /// * C++ API: `find_delegate::invoke_callback`
     #[doc(alias = "find_delegate::invoke_callback")]
-    fn find(&self, mut func: impl FnMut(T::TupleType<'_>) -> bool) -> Option<EntityView<'a>> {
+    fn find(&self, mut func: impl FnMut(T::TupleType<'_>) -> bool) -> Option<EntityView<'world>> {
         unsafe {
             let mut iter = self.retrieve_iter();
             let mut entity: Option<EntityView> = None;
@@ -449,7 +400,7 @@ where
     fn find_entity(
         &self,
         mut func: impl FnMut(EntityView, T::TupleType<'_>) -> bool,
-    ) -> Option<EntityView<'a>> {
+    ) -> Option<EntityView<'world>> {
         unsafe {
             let mut iter = self.retrieve_iter();
             let mut entity_result: Option<EntityView> = None;
@@ -495,7 +446,7 @@ where
     fn find_iter(
         &self,
         mut func: impl FnMut(TableIter<false, P>, usize, T::TupleType<'_>) -> bool,
-    ) -> Option<EntityView<'a>>
+    ) -> Option<EntityView<'world>>
     where
         P: ComponentId,
     {
@@ -1017,7 +968,7 @@ where
     /// * [`Query::first_only`]
     #[doc(alias = "iterable::first")]
     #[doc(alias = "iter_iterable::first")]
-    fn try_first_entity(&self) -> Option<EntityView<'a>> {
+    fn try_first_entity(&self) -> Option<EntityView<'world>> {
         let it = &mut self.retrieve_iter();
 
         if self.iter_next(it) && it.count > 0 {
@@ -1076,7 +1027,7 @@ where
     /// * [`Query::first_only`]
     #[doc(alias = "iterable::first")]
     #[doc(alias = "iter_iterable::first")]
-    fn first_entity(&self) -> EntityView<'a> {
+    fn first_entity(&self) -> EntityView<'world> {
         self.try_first_entity()
             .expect("Expected at least one entity, but none were found.")
     }

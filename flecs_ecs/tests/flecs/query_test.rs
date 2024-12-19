@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 use flecs_ecs::core::*;
 use flecs_ecs::macros::*;
+use lending_iterator::LendingIterator as _;
 
 use crate::common_test::*;
 
@@ -134,11 +135,27 @@ fn query_each_iterator() {
 
     let q = world.query::<(&mut Position, &Velocity)>().build();
 
-    let mut it = q.into_each();
-    while let Some((p, v)) = it.next() {
+    let it = q.into_each();
+    it.for_each(|(p, v)| {
         p.x += v.x;
         p.y += v.y;
-    }
+    });
+
+    let it = q.into_each();
+    dbg!(it
+        .map_to_ref(|[], t| t.1)
+        .map_into_iter(Clone::clone)
+        .collect::<Vec<_>>());
+    // q.into_each_iter()
+    //     .map::<HKT!((&mut Position, &Velocity)), _>(|[], t| t.2)
+    //     .for_each(|t| {
+    //         dbg!(t);
+    //     });
+
+    // while let Some((_it, _idx, (p, v))) = it.next() {
+    //     p.x += v.x;
+    //     p.y += v.y;
+    // }
 
     // q.each(|(p, v)| {
     //     p.x += v.x;

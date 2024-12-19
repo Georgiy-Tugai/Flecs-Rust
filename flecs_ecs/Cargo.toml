@@ -30,6 +30,7 @@ hashbrown = "0.15.0"
 # used for backtraces upon hardware exceptions during test
 # only used when "test-with-crash-handler" feature enabled
 test_crash_handler = { version = "0.1.0", path = "../test_crash_handler", optional = true }
+lending-iterator = "0.1.7"
 
 [dev-dependencies]
 criterion = "0.5.1"
