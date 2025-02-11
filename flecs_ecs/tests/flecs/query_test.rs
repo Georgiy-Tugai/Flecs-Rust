@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 use flecs_ecs::core::*;
 use flecs_ecs::macros::*;
+use flecs_ecs::newtype_of_entity_view;
+use lending_iterator::prelude::HKT;
 use lending_iterator::LendingIterator as _;
 
 use crate::common_test::*;
@@ -142,15 +144,20 @@ fn query_each_iterator() {
     });
 
     let it = q.into_each();
-    dbg!(it
-        .map_to_ref(|[], t| t.1)
-        .map_into_iter(Clone::clone)
-        .collect::<Vec<_>>());
-    // q.into_each_iter()
-    //     .map::<HKT!((&mut Position, &Velocity)), _>(|[], t| t.2)
-    //     .for_each(|t| {
-    //         dbg!(t);
-    //     });
+    it.for_each(|(p, v)| {
+        p.x += v.x;
+        p.y += v.y;
+    });
+    // dbg!(it
+    //     .map_to_ref(|[], t| t.1)
+    //     .map_into_iter(Clone::clone)
+    //     .collect::<Vec<_>>());
+
+    q.into_each_iter()
+        .map::<HKT!((&mut Position, &Velocity)), _>(|[], t| t.2)
+        .for_each(|t| {
+            dbg!(t);
+        });
 
     // while let Some((_it, _idx, (p, v))) = it.next() {
     //     p.x += v.x;
@@ -166,6 +173,82 @@ fn query_each_iterator() {
         assert_eq!(p.x, 11);
         assert_eq!(p.y, 22);
     });
+}
+
+use lending_iterator::prelude::*;
+macro_rules! implLendingIterator {
+    (for<$lt:lifetime> $t:ty) => {impl LendingIterator + for<$lt> LendingIteratorඞItem<$lt, T = $t>}
+}
+
+#[test]
+fn blah() {
+    newtype_of_entity_view!(struct Thing(EntityView));
+    struct FoosIndex(u32);
+
+    #[derive(Component)]
+    struct Foos {
+        foos: Vec<Foo>,
+    };
+    struct Foo();
+
+    struct FooState(u32);
+
+    #[derive(Component)]
+    struct FoosState {
+        states: Vec<FooState>,
+    }
+
+    impl Thing<'_> {
+        pub fn each_foo<F: FnMut(FoosIndex, &Foo, &FooState)>(&self, mut cb: F) {
+            if let Some(bar) = self.target::<&Bar>(0) {
+                self.try_get::<&FoosState>(move |state| {
+                    bar.try_get::<&Foos>(move |foos| {
+                        for (idx, baz) in foos.foos.iter().enumerate() {
+                            cb(FoosIndex(idx as u32), baz, &state.states[idx]);
+                        }
+                    });
+                });
+            }
+        }
+
+        pub fn foo_iter2(
+            &self,
+        ) -> implLendingIterator!(for<'next> (FoosIndex, &'next Foo, &'next FooState)) {
+            let mut foos = self.target::<&Bar>(0).unwrap().get_ref::<&Foos>();
+            let mut state = self.get_ref::<&FoosState>();
+            let count = foos.try_get(|foos| foos.foos.len()).unwrap_or(0);
+
+            lending_iterator::from_fn::<HKT!((FoosIndex, &Foo, &FooState)), _, _>(
+                0usize,
+                move |idx| {
+                    if *idx >= count {
+                        return None;
+                    }
+                    let ret = (
+                        FoosIndex(*idx as u32),
+                        foos.try_get(|foos| &foos.foos[*idx])?,
+                        state.try_get(|state| &state.states[*idx])?,
+                    );
+                    *idx += 1;
+                    Some(ret)
+                },
+            )
+        }
+
+        pub fn foo_iter3(&self) -> impl Iterator + use<'_> {
+            let mut foos = self.target::<&Bar>(0).unwrap().get_ref::<&Foos>();
+            let count = foos.try_get(|foos| foos.foos.len()).unwrap_or(0);
+            let mut state = self.get_ref::<&FoosState>();
+
+            (0..count).map(move |idx| {
+                (
+                    FoosIndex(idx as u32),
+                    foos.try_get(|foos| &foos.foos[idx]).unwrap(),
+                    state.try_get(|state| &state.states[idx]).unwrap(),
+                )
+            })
+        }
+    }
 }
 
 #[test]
